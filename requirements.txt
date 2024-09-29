@@ -2,8 +2,9 @@ streamlit==1.25.0
 langchain==0.0.274
 langchain_community==0.0.7
 openai==0.27.7
-python-dotenv==1.0.0
-pydantic==1.10.2
 pillow==9.2.0  # Precompiled version to avoid zlib issues
 faiss-cpu==1.7.3
-pymupdf==1.23.3
+PyMuPDF==1.20.2  # Precompiled version to avoid compilation errors
+python-dotenv==1.0.0
+pydantic==1.10.2
+
