@@ -1,3 +1,4 @@
+import streamlit as st
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -11,16 +12,16 @@ from dotenv import load_dotenv
 import os
 import re
 from typing import List
-import pprint
 from operator import itemgetter
 
+# Set Streamlit to wide mode
+st.set_page_config(layout="wide")
 
 # Load environment variables
 load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
-
-# Define helper functions
+# Helper functions
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
@@ -29,73 +30,40 @@ def clean_text(text):
 def load_or_create_faiss_index():
     embeddings = HuggingFaceEmbeddings()
 
-    # Check if FAISS index exists
     if os.path.exists("faiss_index"):
         try:
-            # Load the existing FAISS index from the disk
             db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-            print("#################FAISS index loaded successfully from disk.######################")
+            print("FAISS index loaded from disk.")
         except Exception as e:
             print(f"Error loading FAISS index: {e}")
             db = None
     else:
-        print("####################FAISS index not found. Creating a new one...########################3")
-
-        # Load documents from the directory
         reference_documents_folder = "documents"
         loader = DirectoryLoader(reference_documents_folder, glob="*.pdf", loader_cls=PyMuPDFLoader)
         docs = loader.load()
 
-        # Clean and split the documents into chunks
         for doc in docs:
             doc.page_content = clean_text(doc.page_content)
 
         text_splitter = RecursiveCharacterTextSplitter(keep_separator=True, chunk_size=1000, chunk_overlap=200)
         splitted_docs = text_splitter.split_documents(docs)
 
-        # Extract the text content from each document for embedding
         texts = [doc.page_content for doc in splitted_docs]
 
-        # Create FAISS index from the text content
         db = FAISS.from_texts(texts, embeddings)
-        
-        # Save the FAISS index locally
         db.save_local("faiss_index")
-        print("####################3FAISS index created and saved successfully.##############################")
 
     return db
 
-# Load the FAISS index or create it if it doesn't exist
 db = load_or_create_faiss_index()
 
-"""
-#Use the following lines for Testing
-query = "what is an Isolator?"
-queried_docs = db.similarity_search(query, k = 6)
+# Define LLM
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-i=1
-for chunk in queried_docs:
-  print(f"Chunk: {i}\n")
-  pprint.pprint(chunk.page_content)
-  print("#" *100)
-  i+=1
-#Testing end
-"""
-
-#Defining the LLM
-llm = ChatOpenAI(model="gpt-4o-mini", temperature = 0)
-
-# Define the CitedAnswer and ChatSession classes as provided
+# Define classes
 class CitedAnswer(BaseModel):
-    """Answer the user question based only on the given sources, and cite the sources used."""
-    answer: str = Field(
-        ...,
-        description="The answer to the user question, which is based only on the given sources."
-    )
-    citations: List[int] = Field(
-        ...,
-        description="The integer IDs of the SPECIFIC sources which justify the answer."
-    )
+    answer: str
+    citations: List[int]
 
 class ChatSession:
     def __init__(self):
@@ -109,84 +77,56 @@ class ChatSession:
         })
 
     def get_context(self) -> str:
-        # Combine all previous answers to create context
         context = "\n".join([interaction["cited_answer"].answer for interaction in self.history])
         return context
 
     def chat(self, question: str):
-        # Get the previous context
         context = self.get_context()
-
-        # Combine the context with the new question
         full_context = f"{context}\n\nUser Question: {question}"
 
-        # Process the chain with the new question
         result = chain.invoke(full_context)
-
-        # Extract the cited answer and documents
         cited_answer = result['cited_answer']
         docs = result['docs']
 
-        # Map citations to document references
-        citation_map = {i + 1: f"Document {i + 1}" for i in range(len(docs))}
-
-        # Update the history with this interaction
         self.add_interaction(question, cited_answer, docs)
 
-        # Format the output
-        answer_output = self.format_answer(cited_answer, docs, citation_map)
-        return answer_output
+        answer_output = self.format_answer(cited_answer, docs)
+        return answer_output, docs, cited_answer.citations
 
-    def format_answer(self, cited_answer, docs, citation_map):
+    def format_answer(self, cited_answer, docs):
         answer_text = f"**Answer:**\n{cited_answer.answer}\n\n**Citations:**\n"
-        if cited_answer.citations:
-            for citation in cited_answer.citations:
-                doc = docs[citation - 1]
-                answer_text += f"- {citation_map[citation]}:\n"
-                answer_text += f"  Title: {doc.metadata.get('title', 'No Title')}\n"
-                answer_text += f"  Source: {doc.metadata.get('source', 'No Source')}\n"
-                answer_text += f"  Page: {doc.metadata.get('page', 'Unknown Page')}\n"
-        else:
-            answer_text += "No citations available."
-
-        documents_text = "\n**Documents:**\n"
-        for i, doc in enumerate(docs):
-            documents_text += f"\nDocument {i+1}:\n"
-            documents_text += f"Title: {doc.metadata.get('title', 'No Title')}\n"
-            documents_text += f"Source: {doc.metadata.get('source', 'No Source')}\n"
-            documents_text += f"Page: {doc.metadata.get('page', 'Unknown Page')}\n"
-            documents_text += "Content Snippet:\n"
-            documents_text += doc.page_content + "...\n"  # Limiting to 500 characters for brevity
-
-        return f"{answer_text}\n\n{documents_text}"
-
-# Function to format documents with their IDs
-def format_docs_with_id(docs: List[Document]) -> str:
-    formatted = [
-        f"Document {i+1}:\nTitle: {doc.metadata.get('title', 'No Title')}\nSource: {doc.metadata.get('source', 'No Source')}\nPage: {doc.metadata.get('page', 'Unknown Page')}\nContent Snippet: {doc.page_content}"
-        for i, doc in enumerate(docs)
-    ]
-    return "\n\n" + "\n\n".join(formatted)
+        for citation in cited_answer.citations:
+            doc = docs[citation - 1]
+            answer_text += f"- Document {citation}:\n"
+            answer_text += f"  Title: {doc.metadata.get('title', 'No Title')}\n"
+            answer_text += f"  Page: {doc.metadata.get('page', 'Unknown Page')}\n"
+        return answer_text
 
 # Create a function to retrieve documents using FAISS
 def retrieve_documents(question: str) -> List[Document]:
     return db.similarity_search(question, k=6)
 
 # Create the necessary Runnables
-format = itemgetter("docs") | RunnableLambda(format_docs_with_id)
+def format_docs_with_id(docs: List[Document]) -> str:
+    formatted = [
+        f"Document {i+1}:\nTitle: {doc.metadata.get('title', 'No Title')}\nPage: {doc.metadata.get('page', 'Unknown Page')}\nContent Snippet: {doc.page_content}"
+        for i, doc in enumerate(docs)
+    ]
+    return "\n\n".join(formatted)
 
 # Modified cited_answer_tool function
 def cited_answer_tool(context: str) -> CitedAnswer:
-    response = llm.invoke(f"Context: {context}\nAnswer based only on the given sources, and cite them using Document numbers (e.g., Document 1, Document 2).")
+    response = llm.invoke(f"Context: {context}\nAnswer based only on the given sources, and cite them using Document numbers.")
 
     response_content = response.content
 
+    # Extract citations using regex
     if "Citations:" in response_content:
         answer = response_content.split("Citations:")[0].strip()
         citations_raw = response_content.split("Citations:")[1].strip()
 
-        # Extract document numbers from the citations
-        citations = [int(x.split()[-1]) for x in citations_raw.split(",") if "Document" in x]
+        # Improved extraction of citation numbers from Document references
+        citations = [int(re.search(r"Document (\d+)", x).group(1)) for x in re.findall(r'Document \d+', citations_raw)]
     else:
         answer = response_content.strip()
         citations = []
@@ -195,37 +135,55 @@ def cited_answer_tool(context: str) -> CitedAnswer:
 
 cited_answer_runnable = RunnableLambda(cited_answer_tool)
 
-# Adjust the input to be a simple string (the question)
 chain = (
     RunnableParallel(question=RunnablePassthrough(), docs=RunnableLambda(retrieve_documents))
-    .assign(context=format)
+    .assign(context=itemgetter("docs") | RunnableLambda(format_docs_with_id))
     .assign(cited_answer=cited_answer_runnable)
     .pick(["cited_answer", "docs"])
 )
 
+# Streamlit app layout
+st.title("Chatbot Based Search")
 
+# Initialize the chat session
+if 'chat_session' not in st.session_state:
+    st.session_state.chat_session = ChatSession()
 
-def interactive_chat():
+# User input
+user_input = st.text_input("Ask a question:", "")
 
-    # Initialize the ChatSession
-    chat_session = ChatSession()
-    
-    while True:
-        # Prompt the user for input
-        user_input = input("User: ")
+# Layout with two columns
+col1, col2 = st.columns([1, 1])  # Adjust the column width here, both are set equally wide
+
+if user_input:
+    try:
+        # Get the answer, documents, and citations
+        answer, docs, citations = st.session_state.chat_session.chat(user_input)
         
-        # Check for the exit condition
-        if user_input.strip().lower() == 'exit':
-            print("Exiting chat session.")
-            break
+        # Display the chat history and answer on the left column
+        with col1:
+            st.subheader("Chat History")
+            # Reverse the history to show the latest chat on top
+            for interaction in reversed(st.session_state.chat_session.history):
+                st.markdown(f"**You:** {interaction['user_input']}")
+                st.markdown(f"**Assistant:** {interaction['cited_answer'].answer}")
         
-        # Use chat_session.chat() to submit the question and get the assistant's reply
-        try:
-            assistant_reply = chat_session.chat(user_input)
-            print(f"Assistant: {assistant_reply}\n")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            break
+        # Display **all** retrieved documents in the right column
+        with col2:
+            st.subheader("Referenced Documents")
+            if docs:
+                for i, doc in enumerate(docs):
+                    # Ensure that every document has a title fallback
+                    title = doc.metadata.get('title')
+                    if not title or title == 'No Title':
+                        title = doc.metadata.get('source', f"Document {i+1}")  # Use the source or default to 'Document {i+1}'
+                    
+                    st.markdown(f"**Document {i+1}:**")
+                    st.markdown(f"Title: {title}")
+                    st.markdown(f"Page: {doc.metadata.get('page', 'Unknown Page')}")
+                    st.markdown(f"Content: {doc.page_content[:500]}...")
+            else:
+                st.markdown("No documents retrieved.")
 
-# Start the interactive chat session
-interactive_chat()
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
