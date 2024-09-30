@@ -45,7 +45,7 @@ def load_or_create_faiss_index():
         for doc in docs:
             doc.page_content = clean_text(doc.page_content)
 
-        text_splitter = RecursiveCharacterTextSplitter(keep_separator=True, chunk_size=1000, chunk_overlap=200)
+        text_splitter = RecursiveCharacterTextSplitter(keep_separator=True, chunk_size=2000, chunk_overlap=0)
         splitted_docs = text_splitter.split_documents(docs)
 
         texts = [doc.page_content for doc in splitted_docs]
@@ -81,15 +81,21 @@ class ChatSession:
         return context
 
     def chat(self, question: str):
-        context = self.get_context()
-        full_context = f"{context}\n\nUser Question: {question}"
+        # Retrieve relevant documents before invoking the LLM
+        docs = retrieve_documents(question)
+        
+        # Create context from previous history and the new documents
+        formatted_docs = format_docs_with_id(docs)
+        full_context = f"Previous Chat Context:\n{self.get_context()}\n\nUser Question: {question}\n\nRelevant Documents:\n{formatted_docs}"
 
+        # Invoke the LLM using the full context and the relevant documents
         result = chain.invoke(full_context)
         cited_answer = result['cited_answer']
-        docs = result['docs']
 
+        # Add interaction to history
         self.add_interaction(question, cited_answer, docs)
 
+        # Return answer, docs, and citations
         answer_output = self.format_answer(cited_answer, docs)
         return answer_output, docs, cited_answer.citations
 
@@ -102,11 +108,11 @@ class ChatSession:
             answer_text += f"  Page: {doc.metadata.get('page', 'Unknown Page')}\n"
         return answer_text
 
-# Create a function to retrieve documents using FAISS
+# Retrieve documents using FAISS
 def retrieve_documents(question: str) -> List[Document]:
     return db.similarity_search(question, k=6)
 
-# Create the necessary Runnables
+# Format retrieved documents for the LLM
 def format_docs_with_id(docs: List[Document]) -> str:
     formatted = [
         f"Document {i+1}:\nTitle: {doc.metadata.get('title', 'No Title')}\nPage: {doc.metadata.get('page', 'Unknown Page')}\nContent Snippet: {doc.page_content}"
@@ -114,7 +120,7 @@ def format_docs_with_id(docs: List[Document]) -> str:
     ]
     return "\n\n".join(formatted)
 
-# Modified cited_answer_tool function
+# Cited answer extraction tool
 def cited_answer_tool(context: str) -> CitedAnswer:
     response = llm.invoke(f"Context: {context}\nAnswer based only on the given sources, and cite them using Document numbers.")
 
@@ -125,7 +131,7 @@ def cited_answer_tool(context: str) -> CitedAnswer:
         answer = response_content.split("Citations:")[0].strip()
         citations_raw = response_content.split("Citations:")[1].strip()
 
-        # Improved extraction of citation numbers from Document references
+        # Extract citation numbers from Document references
         citations = [int(re.search(r"Document (\d+)", x).group(1)) for x in re.findall(r'Document \d+', citations_raw)]
     else:
         answer = response_content.strip()
@@ -133,6 +139,7 @@ def cited_answer_tool(context: str) -> CitedAnswer:
 
     return CitedAnswer(answer=answer, citations=citations)
 
+# Define chain using FAISS document retrieval and LLM answer generation
 cited_answer_runnable = RunnableLambda(cited_answer_tool)
 
 chain = (
@@ -153,7 +160,7 @@ if 'chat_session' not in st.session_state:
 user_input = st.text_input("Ask a question:", "")
 
 # Layout with two columns
-col1, col2 = st.columns([1, 1])  # Adjust the column width here, both are set equally wide
+col1, col2 = st.columns([1, 1])
 
 if user_input:
     try:
@@ -163,25 +170,20 @@ if user_input:
         # Display the chat history and answer on the left column
         with col1:
             st.subheader("Chat History")
-            # Reverse the history to show the latest chat on top
             for interaction in reversed(st.session_state.chat_session.history):
                 st.markdown(f"**You:** {interaction['user_input']}")
                 st.markdown(f"**Assistant:** {interaction['cited_answer'].answer}")
         
-        # Display **all** retrieved documents in the right column
+        # Display referenced documents in the right column
         with col2:
             st.subheader("Referenced Documents")
             if docs:
                 for i, doc in enumerate(docs):
-                    # Ensure that every document has a title fallback
-                    title = doc.metadata.get('title')
-                    if not title or title == 'No Title':
-                        title = doc.metadata.get('source', f"Document {i+1}")  # Use the source or default to 'Document {i+1}'
-                    
+                    title = doc.metadata.get('title') or doc.metadata.get('source', f"Document {i+1}")
                     st.markdown(f"**Document {i+1}:**")
                     st.markdown(f"Title: {title}")
                     st.markdown(f"Page: {doc.metadata.get('page', 'Unknown Page')}")
-                    st.markdown(f"Content: {doc.page_content[:500]}...")
+                    st.markdown(f"Content: {doc.page_content}")
             else:
                 st.markdown("No documents retrieved.")
 
